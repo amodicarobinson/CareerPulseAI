@@ -10,12 +10,45 @@ interface JobCardProps {
   onSkip?: (id: string) => void;
 }
 
+function cleanText(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/<[^>]*>/g, "") // Remove HTML tags
+    .replace(/\*{2,}/g, "") // Remove markdown **
+    .replace(/^["'\s]+|["'\s]+$/g, "") // Remove outer quotes/whitespace
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+}
+
+function cleanJobTitle(title: string, company: string): string {
+  let cleaned = cleanText(title);
+  if (company) {
+    const cleanComp = cleanText(company).toLowerCase();
+    const suffixPatterns = [
+      new RegExp(`\\s+(at|for|with|\\-|\\|)\\s+${cleanComp}.*`, 'i'),
+      new RegExp(`\\s+${cleanComp}\\s+Careers.*`, 'i')
+    ];
+    for (const pattern of suffixPatterns) {
+      cleaned = cleaned.replace(pattern, '').trim();
+    }
+  }
+  return cleaned;
+}
+
 export function JobCard({ job, onApply, userProfile }: JobCardProps) {
   const isPreparing = job.status === 'preparing';
   const isApplied = job.status === 'applied';
   const isAutoPilot = job.isAutoPilot;
   const [showSalaryTooltip, setShowSalaryTooltip] = React.useState(false);
   const [isExpanded, setIsExpanded] = React.useState(false);
+
+  const displayTitle = cleanJobTitle(job.title, job.company);
+  const displayCompany = cleanText(job.company);
+  const displayLocation = cleanText(job.location || 'Remote');
 
   return (
     <motion.div
@@ -42,14 +75,16 @@ export function JobCard({ job, onApply, userProfile }: JobCardProps) {
             <Briefcase className="w-6 h-6 sm:w-7 sm:h-7" />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="text-base font-bold text-[var(--text-primary)] break-words whitespace-normal" title={job.title}>{job.title}</h3>
+            <h3 className="text-base font-bold text-[var(--text-primary)] break-words whitespace-normal tracking-tight" title={displayTitle}>
+              {displayTitle}
+            </h3>
             <div className="flex flex-col gap-1.5 mt-1">
                <div className="flex items-center gap-2 overflow-hidden">
-                  <span className="text-sm font-semibold text-[var(--text-secondary)] truncate">{job.company}</span>
+                  <span className="text-sm font-semibold text-[var(--text-secondary)] truncate">{displayCompany}</span>
                   <span className="text-slate-300 shrink-0">•</span>
                   <span className="text-sm text-slate-400 flex items-center gap-1.5 truncate">
                      <MapPin size={12} className="shrink-0" />
-                     <span className="truncate">{job.location || 'Remote'}</span>
+                     <span className="truncate">{displayLocation}</span>
                   </span>
                </div>
                {(job.industry || job.companySize) && (

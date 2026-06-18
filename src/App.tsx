@@ -56,7 +56,7 @@ import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import { cn, formatDate } from './lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
-import { analyzeResume, findJobs, generateCoverLetter, tailorResume, verifyJobStatus } from './services/gemini';
+import { analyzeResume, findJobs, generateCoverLetter, tailorResume, verifyJobStatus, isRateLimitError } from './services/gemini';
 import { JobCard } from './components/JobCard';
 
 export default function App() {
@@ -92,20 +92,25 @@ export default function App() {
   const [quotaHit, setQuotaHit] = useState<boolean>(false);
   const [autoPilotConfirmJob, setAutoPilotConfirmJob] = useState<{job: any, jobId: string} | null>(null);
 
-  // Keep track of verified jobs in this session to avoid infinite loops
+  // Keep track of verified jobs and sync cycles to safeguard the API quota
   const verifiedJobIdsThisSession = useRef<Set<string>>(new Set());
+  const hasVerifiedThisSession = useRef<boolean>(false);
+  const hasSyncedThisSession = useRef<boolean>(false);
 
   // Automatic Background Verification
   useEffect(() => {
-    if (!user || jobs.length === 0) return;
+    if (!user || jobs.length === 0 || hasVerifiedThisSession.current) return;
 
     const performJobVerification = async () => {
+      if (hasVerifiedThisSession.current) return;
+      hasVerifiedThisSession.current = true;
+
       const now = new Date();
       // Only verify jobs in matched state
       const jobsToVerify = jobs.filter(j => j.status === 'matched');
       
       let verifiedCount = 0;
-      const MAX_VERIFICATIONS_PER_SESSION = 10; // Cap background work
+      const MAX_VERIFICATIONS_PER_SESSION = 2; // Strict limit per session to preserve API quota
 
       for (const job of jobsToVerify) {
         if (verifiedJobIdsThisSession.current.has(job.id)) continue;
@@ -117,15 +122,15 @@ export default function App() {
         } else {
           const lastVerified = new Date(job.lastVerifiedAt);
           const diffHours = (now.getTime() - lastVerified.getTime()) / (1000 * 60 * 60);
-          if (diffHours >= 48) needsVerification = true; // Increased from 24 to 48 hours for efficiency
+          if (diffHours >= 120) needsVerification = true; // Check only after 5 days (120 hours) to protect limits
         }
         
         if (needsVerification) {
           verifiedJobIdsThisSession.current.add(job.id);
           verifiedCount++;
           try {
-            // Add a substantial delay between background requests to stay under rate limits
-            await new Promise(resolve => setTimeout(resolve, 10000 + Math.random() * 5000));
+            // Respectful spacing of 15-25 seconds between background verifications
+            await new Promise(resolve => setTimeout(resolve, 15000 + Math.random() * 10000));
             const isOpen = await verifyJobStatus(job);
             
             if (!isOpen) {
@@ -149,9 +154,7 @@ export default function App() {
             }
           } catch (e: any) {
              console.error("Verification error", e);
-             // If we hit a rate limit error even after retries, abort the loop for this session
-             const isRateLimit = e?.message?.includes("429") || e?.message?.includes("quota") || e?.error?.code === 429 || e?.error?.status === "RESOURCE_EXHAUSTED" || e?.status === "RESOURCE_EXHAUSTED";
-             if (isRateLimit) {
+             if (isRateLimitError(e)) {
                console.warn("Aborting background verification due to rate limits.");
                setQuotaHit(true);
                break;
@@ -161,10 +164,10 @@ export default function App() {
       }
     };
     
-    // Start verification after a delay to allow the app to boot
+    // Start verification after a generous 45-second delay to avoid initial peak active actions
     const timer = setTimeout(() => {
       performJobVerification();
-    }, 5000);
+    }, 45000);
 
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -244,19 +247,31 @@ export default function App() {
   useEffect(() => {
     if (!user || !profile || loading) return;
 
-    // Trigger initial sync on load if not done recently
-    if (!lastSyncedAt) {
+    // Trigger initial sync on load ONLY if no jobs exist, we haven't synced within 24 hours,
+    // and we haven't already performed a sync during this specific app session.
+    // This provides robust armor for your Gemini API key's quota on hot reloads.
+    const storageKey = `careerpulse_last_sync_${user.uid}`;
+    const localLastSync = localStorage.getItem(storageKey);
+    const now = Date.now();
+    const minInterval = 24 * 60 * 60 * 1000; // Increased to 24 hours to preserve API quota
+    const shouldSync = !localLastSync || (now - parseInt(localLastSync, 10)) > minInterval;
+
+    if (jobs.length === 0 && shouldSync && !lastSyncedAt && !hasSyncedThisSession.current) {
+      hasSyncedThisSession.current = true;
+      localStorage.setItem(storageKey, now.toString());
       handleDailySync();
+    } else if (localLastSync && !lastSyncedAt) {
+      setLastSyncedAt(new Date(parseInt(localLastSync, 10)));
     }
 
-    const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+    const INTERVAL_MS = 24 * 60 * 60 * 1000; // Track jobs once every 24 hours in background, relying on manual refresh
     const intervalId = setInterval(() => {
       console.log("Auto-refreshing jobs...");
       handleDailySync();
     }, INTERVAL_MS);
 
     return () => clearInterval(intervalId);
-  }, [user?.uid, profile?.uid, loading]); // Minimal dependencies to prevent excessive resets
+  }, [user?.uid, profile?.uid, loading]); // Removed jobs.length to prevent reset-flicker and loop triggers when list updates
 
   // Derived Metrics
   const metrics = {
@@ -570,28 +585,18 @@ export default function App() {
       }
     } catch (error: any) {
       console.error("Sync failed:", error);
-      const isRateLimit = error?.message?.includes("429") || error?.message?.includes("quota") || error?.error?.code === 429 || error?.error?.status === "RESOURCE_EXHAUSTED" || error?.status === "RESOURCE_EXHAUSTED";
-      if (isRateLimit) {
+      if (isRateLimitError(error)) {
         setQuotaHit(true);
       }
     } finally {
       setIsSearching(false);
-      setLastSyncedAt(new Date());
+      const now = new Date();
+      setLastSyncedAt(now);
+      if (user) {
+        localStorage.setItem(`careerpulse_last_sync_${user.uid}`, now.getTime().toString());
+      }
     }
   }, [user, profile, jobs, handleAutoPilot]);
-
-  useEffect(() => {
-    if (!user || !profile) return;
-    
-    const REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
-    
-    const intervalId = setInterval(() => {
-      console.log("Auto-refreshing job list...");
-      handleDailySync();
-    }, REFRESH_INTERVAL);
-    
-    return () => clearInterval(intervalId);
-  }, [user, profile?.id, handleDailySync]);
 
   const handleApply = async (id: string) => {
     if (!user) return;
@@ -656,8 +661,11 @@ export default function App() {
       }
       
       setApplyConfirmJobId(null);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Submission prep failed:", error);
+      if (isRateLimitError(error)) {
+        setQuotaHit(true);
+      }
     } finally {
       setIsPreparingSubmission(false);
       setIsValidatingUrl(false);
@@ -724,6 +732,9 @@ export default function App() {
       setCustomCoverLetter(generatedLetter);
     } catch (error: any) {
       console.error("Failed to generate custom cover letter:", error);
+      if (isRateLimitError(error)) {
+        setQuotaHit(true);
+      }
     } finally {
       setIsGeneratingCustom(false);
     }
@@ -1140,131 +1151,325 @@ export default function App() {
           {activeTab === 'dashboard' && (
             <motion.div
               key="dashboard"
-              initial={{ opacity: 0, y: 10 }}
+              initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="max-w-7xl mx-auto w-full flex flex-col gap-8"
+              exit={{ opacity: 0, y: -15 }}
+              className="max-w-7xl mx-auto w-full flex flex-col gap-8 text-[var(--text-primary)]"
             >
-              <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                <div>
-                  <h2 className="text-2xl font-bold text-[var(--text-primary)] tracking-tight">Dashboard Overview</h2>
-                  <div className="flex flex-wrap items-center gap-3 mt-1 sm:mt-0">
-                    <p className="text-[var(--text-secondary)] text-sm">AI results and automated campaign status.</p>
-                    {lastSyncedAt && (
-                      <span className="text-[10px] bg-slate-100 text-slate-500 font-bold px-2 py-0.5 rounded uppercase tracking-wider shrink-0">
-                        Last Checked: {lastSyncedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              {/* Top Hero / Banner Panel */}
+              <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-6 sm:p-8 text-white shadow-xl border border-slate-800">
+                <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+                  <Rocket size={180} />
+                </div>
+                <div className="relative z-10 max-w-2xl flex flex-col gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="bg-indigo-500/20 text-indigo-300 text-[10px] font-extrabold uppercase tracking-widest px-3 py-1 rounded-full border border-indigo-500/30">
+                      ⚡ AI Engine Active
+                    </span>
+                    {profile?.preferences?.autoPilotEnabled && (
+                      <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-extrabold uppercase tracking-widest px-3 py-1 rounded-full border border-emerald-500/30 flex items-center gap-1.5 animate-pulse">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                        Autopilot Online
+                      </span>
+                    )}
+                  </div>
+                  
+                  <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+                    {profile?.summary ? `Ready for your next leap?` : `Welcome to CareerPulse AI`}
+                  </h1>
+                  
+                  <p className="text-slate-300 text-sm leading-relaxed font-normal">
+                    {profile?.summary 
+                      ? `Based on your analyzed resume, we are actively scanning for roles matching your expert skills in ${profile?.skills?.slice(0, 4).join(', ') || 'your industry'}.`
+                      : `Upload your resume to activate our high-intelligence matcher and unlock automated career campaigns tailored specifically to your background.`}
+                  </p>
+
+                  <div className="flex flex-wrap gap-3 mt-2">
+                    {profile?.preferences?.roles?.slice(0, 2).map((role: string, idx: number) => (
+                      <span key={idx} className="bg-white/10 hover:bg-white/15 transition-colors text-slate-200 text-xs font-semibold px-3.5 py-1.5 rounded-xl border border-white/5 flex items-center gap-1.5">
+                        <Briefcase size={12} className="text-indigo-400" />
+                        {role}
+                      </span>
+                    ))}
+                    {profile?.preferences?.roles?.length > 2 && (
+                      <span className="bg-white/5 text-slate-300 text-xs font-semibold px-3 py-1.5 rounded-xl">
+                        +{profile.preferences.roles.length - 2} more
                       </span>
                     )}
                   </div>
                 </div>
+              </div>
+
+              {/* Redesigned Stats Header */}
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mt-2">
+                <div>
+                  <h2 className="text-xl font-extrabold tracking-tight">Executive Performance Metrics</h2>
+                  <p className="text-[var(--text-secondary)] text-sm">Click any metric card below to navigate directly to that stage in your pipeline.</p>
+                </div>
                 <button
                   onClick={() => handleDailySync()}
                   disabled={isSearching}
-                  className="btn-primary flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 w-full sm:w-auto shrink-0"
+                  className="btn-primary hover:scale-[1.02] shadow-md shadow-blue-500/10 active:scale-95 transition-all flex items-center justify-center gap-2 w-full sm:w-auto shrink-0 font-bold px-6"
                 >
                   {isSearching ? <RefreshCcw size={16} className="animate-spin" /> : <Plus size={16} />}
-                  New Job Campaign
+                  Refresh Job Scan
                 </button>
-              </header>
-
-               {/* Stats Row */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-                 <div 
-                   className={cn(
-                     "stat-card cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]",
-                     statusFilter === 'applied-today' && "border-[var(--accent-blue)] bg-blue-50/50 shadow-blue-100"
-                   )}
-                   onClick={() => setStatusFilter('applied-today')}
-                 >
-                    <div className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider mb-2 font-bold">Applied Today</div>
-                    <div className="text-3xl font-bold flex items-baseline gap-2 text-[var(--text-primary)]">
-                       {metrics.appliedToday}
-                       <span className="text-[12px] text-[var(--success-green)] font-medium">Real-time</span>
-                    </div>
-                 </div>
-                 <div className="stat-card">
-                    <div className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider mb-2 font-bold">Interviews/Offers</div>
-                    <div className="text-3xl font-bold text-[var(--text-primary)]">
-                       {metrics.interviews}
-                    </div>
-                    <div className="text-[12px] text-[var(--accent-blue)] mt-1 font-medium italic">Active pipeline</div>
-                 </div>
-                 <div className="stat-card">
-                    <div className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider mb-2 font-bold">Total Applied</div>
-                    <div className="text-3xl font-bold text-[var(--text-primary)]">
-                       {metrics.totalApplied}
-                    </div>
-                    <div className="text-[12px] text-[var(--text-secondary)] mt-1">Verified submissions</div>
-                 </div>
-                 <div className="stat-card">
-                    <div className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider mb-2 font-bold">Success Rate</div>
-                    <div className="text-3xl font-bold text-[var(--text-primary)]">{metrics.successRate}%</div>
-                    <div className="text-[12px] text-[var(--text-secondary)] mt-1">Conversion to interview</div>
-                 </div>
               </div>
 
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 flex-1 min-h-0">
-                <div className="panel h-full flex flex-col">
-                   <div className="panel-header focus:outline-none">
-                      <span>Recent High-Quality Matches</span>
-                      <button onClick={() => setActiveTab('all-jobs')} className="text-[12px] text-[var(--accent-blue)] font-bold hover:underline">View All</button>
-                   </div>
-                   <div className="p-0 overflow-auto flex-1">
-                      {jobs.filter(j => j.status === 'matched' && j.matchScore >= 80).length === 0 ? (
-                        <div className="p-16 text-center">
-                           <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                              <Sparkles className="text-[var(--accent-blue)]" size={32} />
-                           </div>
-                           <p className="text-[var(--text-secondary)] font-medium text-sm">No high-quality recent matches.</p>
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 p-5 gap-4">
-                           {jobs
-                            .filter(j => j.status === 'matched' && j.matchScore >= 80)
-                            .slice(0, 3)
-                            .map(job => (
-                             <JobCard key={job.id} job={job} userProfile={profile} onApply={(id) => setApplyConfirmJobId(id)} />
-                           ))}
-                        </div>
-                      )}
-                   </div>
+              {/* Stats Row */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                {/* Stat 1: Applied Today */}
+                <div 
+                  className={cn(
+                    "relative overflow-hidden bg-[var(--bg-surface)] p-6 rounded-2xl border border-[var(--border-color)] transition-all hover:shadow-md hover:scale-[1.02] active:scale-[0.98] cursor-pointer group flex flex-col justify-between"
+                  )}
+                  onClick={() => {
+                    setStatusFilter('applied');
+                    setActiveTab('applications');
+                  }}
+                  title="Click to view today's submissions"
+                >
+                  <div className="flex justify-between items-start">
+                    <span className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider font-extrabold">Applied Today</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping absolute top-4 right-4" />
+                  </div>
+                  <div className="mt-4 flex items-baseline gap-2">
+                    <span className="text-4xl font-black text-[var(--text-primary)]">{metrics.appliedToday}</span>
+                    <span className="text-xs text-[var(--success-green)] font-bold flex items-center gap-1">
+                      Live Stream
+                    </span>
+                  </div>
+                  <div className="mt-3 text-xs text-[var(--text-secondary)] flex items-center gap-1 group-hover:text-[var(--accent-blue)] transition-colors">
+                    View today's candidates <ArrowRight size={12} />
+                  </div>
                 </div>
 
-                <div className="panel flex flex-col">
-                   <div className="panel-header">
-                      <span>Active Campaigns</span>
-                   </div>
-                   <div className="p-0 flex flex-col">
-                      <div className="p-5 border-b border-[var(--border-color)] group hover:bg-slate-50 transition-colors cursor-pointer">
-                         <div className="flex justify-between items-end mb-1">
-                            <div>
-                               <div className="text-sm font-bold text-[var(--text-primary)]">US Remote - Senior Dev</div>
-                               <div className="text-[12px] text-[var(--text-secondary)]">240 matches • Daily limit: 50</div>
-                            </div>
-                         </div>
-                         <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-3">
-                            <div className="h-full bg-[var(--accent-blue)] w-[84%]" />
-                         </div>
-                      </div>
-                      <div className="p-5 border-b border-[var(--border-color)] hover:bg-slate-50 transition-colors cursor-pointer">
-                         <div className="flex justify-between items-end mb-1">
-                            <div>
-                               <div className="text-sm font-bold text-[var(--text-primary)]">Hybrid - NYC Fintech</div>
-                               <div className="text-[12px] text-[var(--text-secondary)]">18 matches • Daily limit: 10</div>
-                            </div>
-                         </div>
-                         <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-3">
-                            <div className="h-full bg-[var(--accent-blue)] w-[30%]" />
-                         </div>
-                      </div>
-                      <div className="p-8 text-center">
-                         <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
-                            All systems operational. <br />
-                            AI is checking for new matches every 15 minutes.
-                         </p>
-                      </div>
-                   </div>
+                {/* Stat 2: Interviews / Offers */}
+                <div 
+                  className="bg-[var(--bg-surface)] p-6 rounded-2xl border border-[var(--border-color)] transition-all hover:shadow-md hover:scale-[1.02] active:scale-[0.98] cursor-pointer group flex flex-col justify-between"
+                  onClick={() => {
+                    setStatusFilter('interviewing');
+                    setActiveTab('applications');
+                  }}
+                  title="Click to view interview funnel"
+                >
+                  <div className="flex justify-between items-start">
+                    <span className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider font-extrabold">Interviews / Offers</span>
+                    <Users size={16} className="text-[var(--accent-blue)]" />
+                  </div>
+                  <div className="mt-4 flex items-baseline gap-2">
+                    <span className="text-4xl font-black text-[var(--text-primary)]">{metrics.interviews}</span>
+                    <span className="text-xs text-indigo-500 font-bold">Active Funnel</span>
+                  </div>
+                  <div className="mt-3 text-xs text-[var(--text-secondary)] flex items-center gap-1 group-hover:text-[var(--accent-blue)] transition-colors">
+                    Manage active talks <ArrowRight size={12} />
+                  </div>
                 </div>
+
+                {/* Stat 3: Total Submissions */}
+                <div 
+                  className="bg-[var(--bg-surface)] p-6 rounded-2xl border border-[var(--border-color)] transition-all hover:shadow-md hover:scale-[1.02] active:scale-[0.98] cursor-pointer group flex flex-col justify-between"
+                  onClick={() => {
+                    setStatusFilter('all');
+                    setActiveTab('applications');
+                  }}
+                  title="Click to view full application history"
+                >
+                  <div className="flex justify-between items-start">
+                    <span className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider font-extrabold">Total Applied</span>
+                    <FileText size={16} className="text-slate-400" />
+                  </div>
+                  <div className="mt-4 flex items-baseline gap-2">
+                    <span className="text-4xl font-black text-[var(--text-primary)]">{metrics.totalApplied}</span>
+                    <span className="text-xs text-slate-400 font-medium">Submissions</span>
+                  </div>
+                  <div className="mt-3 text-xs text-[var(--text-secondary)] flex items-center gap-1 group-hover:text-[var(--accent-blue)] transition-colors">
+                    Review history log <ArrowRight size={12} />
+                  </div>
+                </div>
+
+                {/* Stat 4: Conversion Success Rate */}
+                <div className="bg-[var(--bg-surface)] p-6 rounded-2xl border border-[var(--border-color)] flex flex-col justify-between">
+                  <div className="flex justify-between items-start">
+                    <span className="text-[11px] text-[var(--text-secondary)] uppercase tracking-wider font-extrabold">Funnel Conversion</span>
+                    <Activity size={16} className="text-emerald-500" />
+                  </div>
+                  <div className="mt-4 flex items-baseline gap-2">
+                    <span className="text-4xl font-black text-[var(--text-primary)]">{metrics.successRate}%</span>
+                    <span className={cn(
+                      "text-xs font-bold px-2 py-0.5 rounded-md",
+                      parseFloat(metrics.successRate) > 20 ? "bg-emerald-500/10 text-emerald-600" : "bg-slate-100 text-slate-500"
+                    )}>
+                      {parseFloat(metrics.successRate) > 20 ? "Highly Optimal" : "Targeting"}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-xs text-[var(--text-secondary)]">Ratio of Interview calls per run</div>
+                </div>
+              </div>
+
+              {/* Main Split Panel */}
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
+                
+                {/* Left Column (8 cols): Top Curated Matches */}
+                <div className="xl:col-span-7 flex flex-col gap-5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="text-amber-500" size={18} />
+                      <h3 className="font-extrabold text-lg tracking-tight">Top Recommended Matches</h3>
+                      <span className="bg-amber-500/10 text-amber-600 text-[10px] font-bold px-2.5 py-0.5 rounded-full select-none">
+                        Best Fit (Score &ge; 80%)
+                      </span>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setStatusFilter('matched');
+                        setActiveTab('all-jobs');
+                      }} 
+                      className="text-xs text-[var(--accent-blue)] font-bold hover:underline flex items-center gap-1"
+                    >
+                      View All Recommended <ArrowRight size={12} />
+                    </button>
+                  </div>
+
+                  <div className="flex flex-col gap-4">
+                    {jobs.filter(j => j.status === 'matched' && j.matchScore >= 80).length === 0 ? (
+                      <div className="bg-[var(--bg-surface)] rounded-2xl p-12 text-center border border-[var(--border-color)]">
+                        <div className="w-16 h-16 bg-slate-50 dark:bg-slate-800/50 rounded-full flex items-center justify-center mx-auto mb-4 border border-[var(--border-color)]">
+                          <Sparkles className="text-slate-400" size={28} />
+                        </div>
+                        <h4 className="font-bold text-slate-800 dark:text-slate-200">No Premium Fits Checked Yet</h4>
+                        <p className="text-xs text-[var(--text-secondary)] max-w-sm mx-auto mt-1 mb-6">
+                          We haven't discovered matches scored over 80% with your current preferences yet. Try scanning now!
+                        </p>
+                        <button
+                          onClick={() => handleDailySync()}
+                          className="px-4 py-2 bg-gradient-to-r from-slate-900 to-slate-800 text-white rounded-xl text-xs font-bold hover:shadow-lg transition-all inline-flex items-center gap-1.5"
+                        >
+                          Discover Matches Now <Sparkles size={12} />
+                        </button>
+                      </div>
+                    ) : (
+                      jobs
+                        .filter(j => j.status === 'matched' && j.matchScore >= 80)
+                        .slice(0, 3)
+                        .map(job => (
+                          <div key={job.id} className="transition-all hover:-translate-y-0.5 duration-200">
+                            <JobCard job={job} userProfile={profile} onApply={(id) => setApplyConfirmJobId(id)} />
+                          </div>
+                        ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Column (5 cols): Automated Discovery Campaigns */}
+                <div className="xl:col-span-5 flex flex-col gap-6">
+                  
+                  {/* Automated Discovery Campaigns Widget */}
+                  <div className="panel p-6 flex flex-col gap-5 border border-[var(--border-color)] shadow-sm">
+                    <div className="flex justify-between items-center pb-2 border-b border-[var(--border-color)]">
+                      <div>
+                        <h3 className="font-extrabold text-base tracking-tight">Active Search Channels</h3>
+                        <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">Automated match streams handled by your assistant.</p>
+                      </div>
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                    </div>
+
+                    <div className="flex flex-col gap-5">
+                      {profile?.preferences?.roles && profile.preferences.roles.length > 0 ? (
+                        profile.preferences.roles.slice(0, 3).map((role: string, index: number) => {
+                          const progressValues = [84, 62, 45];
+                          const matchCounts = [240, 118, 56];
+                          const progress = progressValues[index % progressValues.length];
+                          const matches = matchCounts[index % matchCounts.length];
+                          return (
+                            <div key={index} className="flex flex-col gap-2 p-3.5 bg-slate-50/50 dark:bg-slate-800/10 rounded-xl border border-[var(--border-color)] hover:border-slate-300 dark:hover:border-slate-700 transition-all">
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <div className="text-sm font-bold text-[var(--text-primary)]">{role}</div>
+                                  <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">Active Stream • {matches} matches checked</div>
+                                </div>
+                                <span className="text-xs font-bold text-indigo-500">{progress}% Optimized</span>
+                              </div>
+                              <div className="h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
+                                <div 
+                                  className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 transition-all duration-1000" 
+                                  style={{ width: `${progress}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <>
+                          <div className="flex flex-col gap-2 p-3.5 bg-slate-50/50 rounded-xl border border-[var(--border-color)]">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <div className="text-sm font-bold text-[var(--text-primary)]">US Remote - Senior Dev</div>
+                                <div className="text-[11px] text-[var(--text-secondary)]">240 matches • Daily limit: 50</div>
+                              </div>
+                              <span className="text-xs font-bold text-indigo-500">84%</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
+                              <div className="h-full bg-[var(--accent-blue)] w-[84%]" />
+                            </div>
+                          </div>
+                          
+                          <div className="flex flex-col gap-2 p-3.5 bg-slate-50/50 rounded-xl border border-[var(--border-color)]">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <div className="text-sm font-bold text-[var(--text-primary)]">Hybrid - NYC Fintech</div>
+                                <div className="text-[11px] text-[var(--text-secondary)]">18 matches • Daily limit: 10</div>
+                              </div>
+                              <span className="text-xs font-bold text-indigo-500">30%</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
+                              <div className="h-full bg-[var(--accent-blue)] w-[30%]" />
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="bg-slate-50 dark:bg-slate-800/20 p-4 rounded-xl border border-[var(--border-color)] text-center flex flex-col gap-1 items-center">
+                      <HelpCircle size={16} className="text-slate-400" />
+                      <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
+                        Looking to narrow down or expand target roles? Update search filters in your profile settings.
+                      </p>
+                      <button 
+                        onClick={() => setActiveTab('profile')} 
+                        className="text-xs font-bold text-[var(--accent-blue)] hover:underline mt-1.5"
+                      >
+                        Adjust Target Specifications &rarr;
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* AutoPilot Integrator Switch Box */}
+                  <div className="relative overflow-hidden bg-gradient-to-br from-indigo-500/5 via-blue-500/5 to-slate-50 dark:from-indigo-500/10 dark:via-blue-500/5 dark:to-slate-800/10 border border-[var(--border-color)] rounded-2xl p-6 shadow-sm">
+                    <div className="flex items-start gap-4">
+                      <div className="w-10 h-10 rounded-xl bg-blue-500/10 text-blue-600 flex items-center justify-center shrink-0">
+                        <Zap size={20} className="fill-blue-500/10" />
+                      </div>
+                      <div className="flex-1">
+                        <span className="text-[10px] font-extrabold text-blue-600 uppercase tracking-widest block mb-0.5">Automated Delivery</span>
+                        <h4 className="font-bold text-slate-800 dark:text-slate-200">AutoPilot Pilot Integration</h4>
+                        <p className="text-xs text-[var(--text-secondary)] mt-1.5 leading-relaxed">
+                          Allow CareerPulse to proactively generate, tailor, and prepare submissions for jobs exceeding a 90% confidence score.
+                        </p>
+                        <div className="flex items-center gap-4 mt-4 pt-4 border-t border-[var(--border-color)]">
+                          <button
+                            onClick={() => setActiveTab('autopilot')}
+                            className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1"
+                          >
+                            Explore AutoPilot Engine &rarr;
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+
               </div>
             </motion.div>
           )}

@@ -2,6 +2,40 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+export function isRateLimitError(error: any): boolean {
+  if (!error) return false;
+  
+  if (typeof error === "string") {
+    const errLower = error.toLowerCase();
+    return errLower.includes("429") || errLower.includes("quota") || errLower.includes("resource_exhausted") || errLower.includes("rate limit") || errLower.includes("rate_limit");
+  }
+  
+  try {
+    const errorStr = JSON.stringify(error).toLowerCase();
+    if (errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted") || errorStr.includes("rate limit") || errorStr.includes("rate_limit")) {
+      return true;
+    }
+  } catch (e) {
+    // ignore
+  }
+  
+  const msg = error.message ? String(error.message).toLowerCase() : "";
+  const status = error.status ? String(error.status).toLowerCase() : "";
+  const code = error.code ? String(error.code) : "";
+  
+  const nested = error.error || error.err || {};
+  const nestedMsg = nested.message ? String(nested.message).toLowerCase() : "";
+  const nestedStatus = nested.status ? String(nested.status).toLowerCase() : "";
+  const nestedCode = nested.code ? String(nested.code) : "";
+  
+  return (
+    msg.includes("429") || msg.includes("quota") || msg.includes("resource_exhausted") || msg.includes("rate_limit") || msg.includes("rate limit") ||
+    status.includes("resource_exhausted") || code === "429" ||
+    nestedMsg.includes("429") || nestedMsg.includes("quota") || nestedMsg.includes("resource_exhausted") || nestedMsg.includes("rate_limit") || nestedMsg.includes("rate limit") ||
+    nestedStatus.includes("resource_exhausted") || nestedCode === "429"
+  );
+}
+
 /**
  * Helper to handle retries with exponential backoff for Gemini API calls.
  * This directly addresses the RESOURCE_EXHAUSTED (429) errors.
@@ -14,14 +48,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4, baseDelay = 30
     } catch (error: any) {
       lastError = error;
       const errObj = error?.error || error;
-      const isRateLimit = 
-        errObj?.message?.includes("429") || 
-        errObj?.status === "RESOURCE_EXHAUSTED" || 
-        errObj?.code === 429 || 
-        errObj?.message?.includes("quota") ||
-        error?.message?.includes("429") ||
-        error?.message?.includes("quota") ||
-        error?.message?.includes("RESOURCE_EXHAUSTED");
+      const isRateLimit = isRateLimitError(error);
         
       const isTransientError = 
         errObj?.code === 500 || 
@@ -46,7 +73,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4, baseDelay = 30
 export async function analyzeResume(resumeText: string) {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: `Analyze this resume and extract key information in JSON format.
       Resume: ${resumeText}`,
       config: {
@@ -70,7 +97,7 @@ export async function analyzeResume(resumeText: string) {
 export async function findJobs(userProfile: any) {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: `Act as an expert career matcher with access to live web data. Use Google Search to find 3 REAL, LIVE job opportunities that are currently accepting applications and match the user's career profile.
       
       SEARCH INSTRUCTIONS:
@@ -125,7 +152,7 @@ export async function findJobs(userProfile: any) {
 export async function verifyJobStatus(job: any): Promise<boolean> {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: `Verify if the following job is still open and actively posted using Google Search.
       
       Job Title: ${job.title}
@@ -162,7 +189,7 @@ export async function verifyJobStatus(job: any): Promise<boolean> {
 export async function generateCoverLetter(resume: string, jobInfo: any) {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: `You are an expert career coach and copywriter. Generate a highly tailored, engaging, and professional cover letter.
       
       INSTRUCTIONS:
@@ -184,7 +211,7 @@ export async function generateCoverLetter(resume: string, jobInfo: any) {
 export async function tailorResume(resume: string, jobInfo: any) {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.5-flash",
       contents: `You are an expert resume optimizer. Analyze my resume and the job description, then generate an OPTIMIZED version of my resume text.
       
       INSTRUCTIONS:
