@@ -1,0 +1,6 @@
+{
+  "name": "CareerPulse AI",
+  "description": "An AI-powered job application assistant that finds, matches, and helps you apply to jobs daily.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

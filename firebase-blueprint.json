@@ -1,0 +1,91 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Information about the job seeker",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "resumeText": { "type": "string" },
+        "skills": { "type": "array", "items": { "type": "string" } },
+        "preferences": {
+          "type": "object",
+          "properties": {
+            "roles": { "type": "array", "items": { "type": "string" } },
+            "locations": { "type": "array", "items": { "type": "string" } },
+            "industries": { "type": "array", "items": { "type": "string" } },
+            "minSalary": { "type": "number" },
+            "autoPilotEnabled": { "type": "boolean" }
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "relationship": { "type": "string" },
+              "email": { "type": "string", "format": "email" },
+              "phone": { "type": "string" },
+              "company": { "type": "string" }
+            },
+            "required": ["name", "relationship"]
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "email"]
+    },
+    "Job": {
+      "title": "Job Listing",
+      "description": "A job opportunity found or saved",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "company": { "type": "string" },
+        "location": { "type": "string" },
+        "description": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "salary": { "type": "string" },
+        "postedDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["matched", "applied", "interviewing", "rejected", "offered"] },
+        "matchScore": { "type": "number" },
+        "matchReason": { "type": "string" },
+        "userUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "company", "userUid"]
+    },
+    "AutoPilotLog": {
+      "title": "AutoPilot Activity Log",
+      "description": "Logs of autonomous actions taken by the system",
+      "type": "object",
+      "properties": {
+        "jobId": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "company": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "status": { "type": "string", "enum": ["success", "error", "info"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["action", "details", "status", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Storage for user profile and settings"
+    },
+    "/users/{userId}/jobs/{jobId}": {
+      "schema": "Job",
+      "description": "Jobs found and tracked for a specific user"
+    },
+    "/users/{userId}/autopilot_logs/{logId}": {
+      "schema": "AutoPilotLog",
+      "description": "Logs of AutoPilot activity for a specific user"
+    }
+  }
+}

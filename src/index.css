@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  --bg-main: #f8fafc;
+  --bg-surface: #ffffff;
+  --sidebar-bg: #1e293b;
+  --sidebar-text: #f1f5f9;
+  --accent-blue: #2563eb;
+  --success-green: #10b981;
+  --border-color: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+}
+
+.dark {
+  --bg-main: #0f172a;
+  --bg-surface: #1e293b;
+  --sidebar-bg: #020617;
+  --sidebar-text: #f8fafc;
+  --accent-blue: #3b82f6;
+  --success-green: #22c55e;
+  --border-color: #334155;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.markdown-body {
+  @apply text-sm leading-relaxed;
+}
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  @apply font-bold mb-2;
+}
+.markdown-body ul {
+  @apply list-disc list-inside mb-2;
+}
+.markdown-body p {
+  @apply mb-2;
+}
+
+.panel {
+  background-color: var(--bg-surface);
+  @apply rounded-xl border border-[var(--border-color)] shadow-sm overflow-hidden flex flex-col;
+}
+
+.panel-header {
+  background-color: var(--bg-surface);
+  @apply px-5 py-4 border-b border-[var(--border-color)] font-semibold text-base flex justify-between items-center;
+}
+
+.stat-card {
+  background-color: var(--bg-surface);
+  @apply p-5 rounded-xl border border-[var(--border-color)] shadow-sm;
+}
+
+.btn-primary {
+  @apply bg-[var(--accent-blue)] text-white px-5 py-2.5 rounded-lg text-sm font-medium border-none hover:opacity-90 transition-opacity;
+}

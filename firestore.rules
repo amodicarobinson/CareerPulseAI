@@ -1,0 +1,99 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+  
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // 
+    // Collection: /users/{userId}
+    //   - uid: string (required) - Firebase Auth UID
+    //   - fullName: string (required) - User's full name
+    //   - email: string (required) - User's email
+    //   - resumeText: string (optional) - Extracted resume content
+    //   - skills: list of strings (optional)
+    //   - preferences: map (optional) 
+    //   - createdAt: timestamp (optional)
+    //
+    // Collection: /users/{userId}/jobs/{jobId}
+    //   - title: string (required)
+    //   - company: string (required)
+    //   - location: string (optional)
+    //   - description: string (optional)
+    //   - url: string (optional)
+    //   - status: string (optional) - enum: matched, applied, interviewing, rejected, offered
+    //   - matchScore: number (optional)
+    //   - userUid: string (required) - Must match parent userId
+    //   - createdAt: timestamp (optional)
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "amodicarobinson@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'fullName', 'email']) &&
+             data.uid is string &&
+             data.fullName is string && data.fullName.size() > 0 && data.fullName.size() < 200 &&
+             data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidJob(data) {
+      return data.keys().hasAll(['title', 'company', 'userUid']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 300 &&
+             data.company is string && data.company.size() > 0 && data.company.size() < 200 &&
+             data.userUid is string && data.userUid == request.auth.uid;
+    }
+
+    function isValidLog(data) {
+      return data.keys().hasAll(['action', 'details', 'status', 'timestamp', 'jobId', 'jobTitle', 'company']) &&
+             data.keys().size() == 7 &&
+             data.action is string && data.action.size() > 0 && data.action.size() < 200 &&
+             data.details is string && data.details.size() > 0 && data.details.size() < 1000 &&
+             data.status in ['success', 'error', 'info'] &&
+             data.jobId is string &&
+             data.jobTitle is string &&
+             data.company is string &&
+             (data.timestamp == request.time || data.timestamp is string); // Allow both for migration
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Users can only read/write their own profile
+      // Exception: Admins can do anything (though not strictly needed for this app yet)
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      allow delete: if isAdmin();
+
+      match /jobs/{jobId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidJob(request.resource.data);
+        allow update: if isOwner(userId) && isValidJob(request.resource.data);
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /autopilot_logs/{logId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidLog(request.resource.data);
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+    }
+  }
+}
